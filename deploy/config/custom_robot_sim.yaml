@@ -1,0 +1,82 @@
+# Simulator config for sim/onnx_joystick_sim.py.
+#
+# Nested format: observation / action / robot / control / command_limits.
+# All parameter values match the training setup of the CustomRobot velocity policy.
+
+observation:
+  frame_stack: 10
+  clip_observations: 100.0
+  phase:
+    period: 0.6
+    stand_threshold: 0.1
+
+action:
+  num_actions: 12
+  clip_actions: 100.0
+  scale: 0.25
+
+robot:
+  joint_names:
+    [
+      "left_hip_yaw_joint",
+      "left_hip_roll_joint",
+      "left_hip_pitch_joint",
+      "left_knee_joint",
+      "left_ankle_pitch_joint",
+      "left_ankle_roll_joint",
+      "right_hip_yaw_joint",
+      "right_hip_roll_joint",
+      "right_hip_pitch_joint",
+      "right_knee_joint",
+      "right_ankle_pitch_joint",
+      "right_ankle_roll_joint",
+    ]
+  default_angles_walk:
+    [0.0, 0.0, 0.2, -0.4, 0.2, 0.0, 0.0, 0.0, 0.2, -0.4, 0.2, 0.0]
+  kps:
+    [100.0, 150.0, 150.0, 180.0, 75.0, 30.0, 100.0, 150.0, 150.0, 180.0, 75.0, 30.0]
+  kds:
+    [1.0, 4.0, 4.0, 4.0, 2.0, 2.0, 1.0, 4.0, 4.0, 4.0, 2.0, 2.0]
+  tau_limit:
+    [80.0, 120.0, 212.0, 180.0, 80.0, 20.0, 80.0, 120.0, 212.0, 180.0, 80.0, 20.0]
+  joint_pos_limits:
+    low:
+      [
+        -0.518,
+        -0.175,
+        -0.524,
+        -1.745,
+        -1.082,
+        -0.664,
+        -0.785,
+        -0.175,
+        -0.524,
+        -1.745,
+        -1.082,
+        -0.664,
+      ]
+    high:
+      [
+        0.518,
+        0.960,
+        1.047,
+        0.087,
+        1.082,
+        0.664,
+        0.785,
+        0.960,
+        1.047,
+        0.087,
+        1.082,
+        0.664,
+      ]
+
+control:
+  simulation_dt: 0.001
+  decimation: 10
+  target_filter_alpha: 1.0
+
+command_limits:
+  lin_vel_x: 1.0
+  lin_vel_y: 0.5
+  ang_vel_z: 0.5

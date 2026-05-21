@@ -1,0 +1,111 @@
+# Deployment config for deploy/deploy_easy_mjlab.py.
+#
+# Flat YAML format (matches deploy_easy_amp.py reference style),
+# preserving the training parameters of the CustomRobot velocity policy.
+#
+# Observation layout (simple phase, 47D per frame):
+#   ang_vel(3) + projected_gravity(3) + command(3) + phase(2) +
+#   joint_pos(12) + joint_vel(12) + last_action(12) = 47
+# frame_stack=10 → policy input = 470D.
+
+policy_path: "/home/wangshun/X_2/rl_locomotion/humanoid_deploy/policies/walk/policy5_18.onnx"
+standup_policy_path: "/home/wangshun/X_2/rl_locomotion/humanoid_deploy/policies/walk/policy5_18.onnx"
+
+simulation_dt: 0.001
+decimation: 10
+target_filter_alpha: 0.2
+frame_stack: 10
+num_single_obs: 47
+
+phase:
+  type: "simple"
+  period: 0.8
+  stand_threshold: 0.1
+
+clip_observations: 100.0
+clip_actions: 100.0
+
+action_scale: 0.22
+num_actions: 12
+
+joint_names:
+  [
+    "left_hip_yaw_joint",
+    "left_hip_roll_joint",
+    "left_hip_pitch_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_yaw_joint",
+    "right_hip_roll_joint",
+    "right_hip_pitch_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+  ]
+
+# Order expected by humanoid_lowerbody_controller target callbacks.
+controller_joint_names:
+  [
+    "left_hip_yaw_joint",
+    "right_hip_yaw_joint",
+    "left_hip_roll_joint",
+    "right_hip_roll_joint",
+    "left_hip_pitch_joint",
+    "right_hip_pitch_joint",
+    "left_knee_joint",
+    "right_knee_joint",
+    "left_ankle_pitch_joint",
+    "right_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_ankle_roll_joint",
+  ]
+
+default_angles:
+  [0.0, 0.0, 0.2, -0.4, 0.2, 0.0, 0.0, 0.0, 0.2, -0.4, 0.2, 0.0]
+default_angles_standup:
+  [0.0, 0.0, 0.2, -0.4, 0.2, 0.0, 0.0, 0.0, 0.2, -0.4, 0.2, 0.0]
+
+robot_config:
+  kps:
+    [100.0, 150.0, 150.0, 180.0, 60.0, 20.0, 100.0, 150.0, 150.0, 180.0, 60.0, 20.0]
+  kds:
+    [1.0, 4.0, 4.0, 4.0, 2.0, 2.0, 1.0, 4.0, 4.0, 4.0, 2.0, 2.0]
+  tau_limit:
+    [50.0, 100.0, 212.0, 93.0, 64.8, 20.0, 50.0, 100.0, 212.0, 93.0, 64.8, 20.0]
+  joint_pos_limits:
+    low:
+      [
+        -0.518,
+        -0.175,
+        -0.524,
+        -1.745,
+        -1.082,
+        -0.664,
+        -0.785,
+        -0.175,
+        -0.524,
+        -1.745,
+        -1.082,
+        -0.664,
+      ]
+    high:
+      [
+        0.518,
+        0.960,
+        1.047,
+        0.087,
+        1.082,
+        0.664,
+        0.785,
+        0.960,
+        1.047,
+        0.087,
+        1.082,
+        0.664,
+      ]
+
+command_limits:
+  lin_vel_x: 0.6
+  lin_vel_y: 0.5
+  ang_vel_z: 0.5
