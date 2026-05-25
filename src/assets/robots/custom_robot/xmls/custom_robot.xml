@@ -85,7 +85,7 @@
       </body>
       <body name="right_hip_yaw_link" pos="0 0 -0.083">
         <inertial pos="-0.0005917 -0.0372409 0.0516011" quat="0.552247 0.521761 -0.459888 0.459665" mass="2.08267" diaginertia="0.0121792 0.00970405 0.0061063"/>
-        <joint name="right_hip_yaw_joint" pos="0 0 0" axis="0 0 -1" range="-0.785 0.785" actuatorfrcrange="-80 80"/>
+        <joint name="right_hip_yaw_joint" pos="0 0 0" axis="0 0 -1" range="-0.518 0.518" actuatorfrcrange="-80 80"/>
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.749024 0.749024 0.749024 1" mesh="right_hip_yaw_link"/>
         <geom size="0.05" pos="0 -0.08 0.08" rgba="0.749024 0.749024 0.749024 1"/>
         <body name="right_hip_roll_link" pos="0.006 -0.1175 0.0315">

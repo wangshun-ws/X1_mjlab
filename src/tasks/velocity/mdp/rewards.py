@@ -131,6 +131,55 @@ def angular_momentum_penalty(
   return angmom_magnitude_sq
 
 
+class normalized_torque_l2:
+  """Penalize squared actuator torque normalized by effort limits."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    asset_cfg = cfg.params["asset_cfg"]
+    asset: Entity = env.scene[asset_cfg.name]
+
+    self._asset_name = asset_cfg.name
+    self._actuator_ids = asset_cfg.actuator_ids
+    actuator_force = asset.data.actuator_force[:, self._actuator_ids]
+    effort_limits = torch.as_tensor(
+      cfg.params["effort_limits"], device=env.device, dtype=actuator_force.dtype
+    )
+    if effort_limits.numel() != actuator_force.shape[1]:
+      raise ValueError(
+        f"effort_limits length {effort_limits.numel()} does not match actuator "
+        f"dimension {actuator_force.shape[1]}."
+      )
+    self._effort_limits = torch.clamp(torch.abs(effort_limits), min=1e-6)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    effort_limits: tuple[float, ...],
+    command_name: str | None = None,
+    command_threshold: float = 0.1,
+  ) -> torch.Tensor:
+    del asset_cfg, effort_limits  # Unused after initialization.
+
+    asset: Entity = env.scene[self._asset_name]
+    torque = asset.data.actuator_force[:, self._actuator_ids]
+    normalized_torque = torque / self._effort_limits.unsqueeze(0)
+    env.extras["log"]["Metrics/normalized_torque_mean"] = torch.mean(
+      torch.abs(normalized_torque)
+    )
+    cost = torch.sum(torch.square(normalized_torque), dim=1)
+
+    if command_name is not None:
+      command = env.command_manager.get_command(command_name)
+      assert command is not None, f"Command '{command_name}' not found."
+      linear_norm = torch.norm(command[:, :2], dim=1)
+      angular_norm = torch.abs(command[:, 2])
+      total_command = linear_norm + angular_norm
+      active = (total_command > command_threshold).float()
+      cost *= active
+    return cost
+
+
 class subset_action_rate_l2:
   """Penalize the rate of change of a subset of raw policy actions."""
 
@@ -176,33 +225,195 @@ class subset_action_rate_l2:
     return torch.sum(torch.square(delta_action), dim=1)
 
 
-def feet_air_time(
-  env: ManagerBasedRlEnv,
-  sensor_name: str,
-  threshold: float = 0.4,
-  command_name: str | None = None,
-  command_threshold: float = 0.1,
-) -> torch.Tensor:
-  """Reward feet air time."""
-  sensor: ContactSensor = env.scene[sensor_name]
-  sensor_data = sensor.data
-  air_time = sensor_data.current_air_time
-  contact_time = sensor_data.current_contact_time
-  in_contact = contact_time > 0.0
-  in_mode_time = torch.where(in_contact, contact_time, air_time)
-  single_stance = torch.mean(in_contact.float(), dim=1) == 0.5
-  mode_time = torch.min(torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1)[0]
-  error = torch.abs(mode_time - threshold)
-  reward = torch.clamp(threshold - error, min=0.0)
-  if command_name is not None:
+class feet_air_time:
+  """Penalize swing air time outside a target interval at touchdown."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    sensor: ContactSensor = env.scene[cfg.params["sensor_name"]]
+    current_air_time = sensor.data.current_air_time
+    assert current_air_time is not None
+    self._last_air_time = torch.zeros_like(current_air_time)
+
+    min_air_time = cfg.params["min_air_time"]
+    max_air_time = cfg.params["max_air_time"]
+    if min_air_time > max_air_time:
+      raise ValueError(
+        f"min_air_time ({min_air_time}) must be <= max_air_time ({max_air_time})."
+      )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    min_air_time: float,
+    max_air_time: float,
+    command_threshold: float = 0.1,
+  ) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    current_air_time = sensor.data.current_air_time
+    assert current_air_time is not None
+    first_contact = sensor.compute_first_contact(dt=env.step_dt)
+    if first_contact.shape != current_air_time.shape:
+      raise ValueError(
+        f"first_contact shape {tuple(first_contact.shape)} does not match air "
+        f"time shape {tuple(current_air_time.shape)}."
+      )
+
+    reset_mask = env.episode_length_buf == 0
+    self._last_air_time[reset_mask] = 0.0
+    self._last_air_time = torch.where(
+      current_air_time > 0.0, current_air_time, self._last_air_time
+    )
+    landed_air_time = torch.maximum(current_air_time, self._last_air_time)
+    first_contact_float = first_contact.float()
+
+    low_error = torch.clamp(min_air_time - landed_air_time, min=0.0)
+    high_error = torch.clamp(landed_air_time - max_air_time, min=0.0)
+    cost = torch.sum(
+      (torch.square(low_error) + torch.square(high_error)) * first_contact_float,
+      dim=1,
+    )
+
+    num_touchdowns = torch.sum(first_contact_float)
+    mean_air_time = torch.sum(landed_air_time * first_contact_float) / torch.clamp(
+      num_touchdowns, min=1
+    )
+    env.extras["log"]["Metrics/air_time_mean"] = mean_air_time
+
+    self._last_air_time = torch.where(
+      first_contact, torch.zeros_like(self._last_air_time), self._last_air_time
+    )
+
     command = env.command_manager.get_command(command_name)
-    if command is not None:
-      linear_norm = torch.norm(command[:, :2], dim=1)
-      angular_norm = torch.abs(command[:, 2])
-      total_command = linear_norm + angular_norm
-      scale = (total_command > command_threshold).float()
-      reward *= scale
-  return reward
+    assert command is not None, f"Command '{command_name}' not found."
+    linear_norm = torch.norm(command[:, :2], dim=1)
+    angular_norm = torch.abs(command[:, 2])
+    total_command = linear_norm + angular_norm
+    active = (total_command > command_threshold).float()
+    return cost * active
+
+
+class feet_contact_balance:
+  """Penalize long-window contact duty imbalance between left and right foot."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    sensor: ContactSensor = env.scene[cfg.params["sensor_name"]]
+    found = sensor.data.found
+    assert found is not None
+    if found.shape[1] != 2:
+      raise ValueError(
+        f"feet_contact_balance expects exactly 2 feet, got found shape "
+        f"{tuple(found.shape)}."
+      )
+    self._duty = torch.zeros_like(found, dtype=torch.float32)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    command_threshold: float = 0.1,
+    window_s: float = 0.8,
+    allowed_imbalance: float = 0.2,
+  ) -> torch.Tensor:
+    if window_s <= 0.0:
+      raise ValueError(f"window_s must be positive, got {window_s}.")
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    found = sensor.data.found
+    assert found is not None
+    if found.shape != self._duty.shape or found.shape[1] != 2:
+      raise ValueError(
+        f"feet_contact_balance expects found shape {tuple(self._duty.shape)}, "
+        f"got {tuple(found.shape)}."
+      )
+
+    reset_mask = env.episode_length_buf == 0
+    self._duty[reset_mask] = 0.0
+
+    in_contact = (found > 0).float()
+    alpha = 1.0 - torch.exp(
+      torch.as_tensor(-env.step_dt / window_s, device=env.device)
+    )
+    self._duty = (1.0 - alpha) * self._duty + alpha * in_contact
+
+    diff = torch.abs(self._duty[:, 0] - self._duty[:, 1])
+    env.extras["log"]["Metrics/feet_contact_balance_diff"] = torch.mean(diff)
+    env.extras["log"]["Metrics/left_contact_duty"] = torch.mean(self._duty[:, 0])
+    env.extras["log"]["Metrics/right_contact_duty"] = torch.mean(self._duty[:, 1])
+
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    command_speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+    active = (command_speed > command_threshold).float()
+
+    excess = torch.clamp(diff - allowed_imbalance, min=0.0)
+    return torch.square(excess) * active
+
+
+class feet_double_support:
+  """Penalize excessive double-support duty during commanded locomotion."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    sensor: ContactSensor = env.scene[cfg.params["sensor_name"]]
+    found = sensor.data.found
+    assert found is not None
+    if found.shape[1] != 2:
+      raise ValueError(
+        f"feet_double_support expects exactly 2 feet, got found shape "
+        f"{tuple(found.shape)}."
+      )
+    self._double_support_duty = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    command_threshold: float = 0.1,
+    window_s: float = 0.8,
+    allowed_double_support: float = 0.45,
+  ) -> torch.Tensor:
+    if window_s <= 0.0:
+      raise ValueError(f"window_s must be positive, got {window_s}.")
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    found = sensor.data.found
+    assert found is not None
+    if found.shape[1] != 2:
+      raise ValueError(
+        f"feet_double_support expects exactly 2 feet, got found shape "
+        f"{tuple(found.shape)}."
+      )
+
+    reset_mask = env.episode_length_buf == 0
+    self._double_support_duty[reset_mask] = 0.0
+
+    in_contact = found > 0
+    double_support = torch.logical_and(in_contact[:, 0], in_contact[:, 1]).float()
+    alpha = 1.0 - torch.exp(
+      torch.as_tensor(-env.step_dt / window_s, device=env.device)
+    )
+    self._double_support_duty = (
+      (1.0 - alpha) * self._double_support_duty + alpha * double_support
+    )
+
+    env.extras["log"]["Metrics/double_support_duty"] = torch.mean(
+      self._double_support_duty
+    )
+
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    command_speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+    active = (command_speed > command_threshold).float()
+
+    excess = torch.clamp(
+      self._double_support_duty - allowed_double_support, min=0.0
+    )
+    return torch.square(excess) * active
 
 
 def feet_clearance(
@@ -337,6 +548,54 @@ def feet_slip(
   )
   env.extras["log"]["Metrics/slip_velocity_mean"] = mean_slip_vel
   return cost
+
+
+def feet_touchdown_velocity(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  command_name: str,
+  base_threshold: float,
+  threshold_gain: float,
+  max_threshold: float | None = None,
+  command_threshold: float = 0.1,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize excessive downward foot velocity on first ground contact."""
+  asset: Entity = env.scene[asset_cfg.name]
+  contact_sensor: ContactSensor = env.scene[sensor_name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+
+  first_contact = contact_sensor.compute_first_contact(dt=env.step_dt)
+  foot_vel_z = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, 2]
+  if first_contact.shape != foot_vel_z.shape:
+    raise ValueError(
+      f"first_contact shape {tuple(first_contact.shape)} does not match foot "
+      f"velocity shape {tuple(foot_vel_z.shape)}."
+    )
+
+  command_speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+  velocity_threshold = base_threshold + threshold_gain * command_speed
+  if max_threshold is not None:
+    velocity_threshold = torch.clamp(velocity_threshold, max=max_threshold)
+
+  downward_speed = torch.clamp(-foot_vel_z, min=0.0)
+  first_contact_float = first_contact.float()
+  touchdown_speed = downward_speed * first_contact_float
+  num_touchdowns = torch.sum(first_contact_float)
+  mean_touchdown_speed = torch.sum(touchdown_speed) / torch.clamp(
+    num_touchdowns, min=1
+  )
+  env.extras["log"]["Metrics/touchdown_velocity_mean"] = mean_touchdown_speed
+  env.extras["log"]["Metrics/touchdown_velocity_threshold_mean"] = torch.mean(
+    velocity_threshold
+  )
+
+  excess = torch.clamp(
+    downward_speed - velocity_threshold.unsqueeze(1), min=0.0
+  )
+  active = (command_speed > command_threshold).float()
+  return torch.sum(torch.square(excess) * first_contact_float, dim=1) * active
 
 
 def soft_landing(

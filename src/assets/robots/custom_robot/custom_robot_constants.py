@@ -48,7 +48,7 @@ CUSTOM_ROBOT_ACTUATOR_HIP_YAW = DelayedActuatorCfg(
     armature=0.05,
   ),
   delay_min_lag=0,
-  delay_max_lag=2,
+  delay_max_lag=0,
   delay_update_period=2001,
   delay_hold_prob=0.0,
 )
@@ -61,7 +61,7 @@ CUSTOM_ROBOT_ACTUATOR_HIP_ROLL = DelayedActuatorCfg(
     armature=0.05,
   ),
   delay_min_lag=0,
-  delay_max_lag=2,
+  delay_max_lag=0,
   delay_update_period=2001,
   delay_hold_prob=0.0,
 )
@@ -70,11 +70,11 @@ CUSTOM_ROBOT_ACTUATOR_HIP_PITCH = DelayedActuatorCfg(
     target_names_expr=(".*_hip_pitch_joint",),
     stiffness=150.0,
     damping=4.0,
-    effort_limit=212.0,
+    effort_limit=120.0,
     armature=0.05,
   ),
   delay_min_lag=0,
-  delay_max_lag=2,
+  delay_max_lag=0,
   delay_update_period=2001,
   delay_hold_prob=0.0,
 )
@@ -87,7 +87,7 @@ CUSTOM_ROBOT_ACTUATOR_KNEE = DelayedActuatorCfg(
     armature=0.05,
   ),
   delay_min_lag=0,
-  delay_max_lag=2,
+  delay_max_lag=0,
   delay_update_period=2001,
   delay_hold_prob=0.0,
 )
@@ -100,7 +100,7 @@ CUSTOM_ROBOT_ACTUATOR_ANKLE_PITCH = DelayedActuatorCfg(
     armature=0.05,
   ),
   delay_min_lag=0,
-  delay_max_lag=2,
+  delay_max_lag=0,
   delay_update_period=2001,
   delay_hold_prob=0.0,
 )
@@ -113,7 +113,7 @@ CUSTOM_ROBOT_ACTUATOR_ANKLE_ROLL = DelayedActuatorCfg(
     armature=0.05,
   ),
   delay_min_lag=0,
-  delay_max_lag=2,
+  delay_max_lag=0,
   delay_update_period=2001,
   delay_hold_prob=0.0,
 )
@@ -128,9 +128,9 @@ INIT_STATE = EntityCfg.InitialStateCfg(
   joint_pos={
     ".*_hip_yaw_joint": 0.0,
     ".*_hip_roll_joint": 0.0,
-    ".*_hip_pitch_joint": 0.2,
-    ".*_knee_joint": -0.4,
-    ".*_ankle_pitch_joint": 0.2,
+    ".*_hip_pitch_joint": 0.3,
+    ".*_knee_joint": -0.6,
+    ".*_ankle_pitch_joint": 0.3,
     ".*_ankle_roll_joint": 0.0,
   },
   joint_vel={".*": 0.0},
@@ -168,6 +168,39 @@ CUSTOM_ROBOT_ARTICULATION = EntityArticulationInfoCfg(
     CUSTOM_ROBOT_ACTUATOR_ANKLE_ROLL,
   ),
   soft_joint_pos_limit_factor=0.9,
+)
+
+
+def _actuator_effort_limit(actuator: DelayedActuatorCfg) -> float:
+  return float(actuator.base_cfg.effort_limit)
+
+
+_LEG_ACTUATORS = (
+  CUSTOM_ROBOT_ACTUATOR_HIP_YAW,
+  CUSTOM_ROBOT_ACTUATOR_HIP_ROLL,
+  CUSTOM_ROBOT_ACTUATOR_HIP_PITCH,
+  CUSTOM_ROBOT_ACTUATOR_KNEE,
+  CUSTOM_ROBOT_ACTUATOR_ANKLE_PITCH,
+  CUSTOM_ROBOT_ACTUATOR_ANKLE_ROLL,
+)
+
+CUSTOM_ROBOT_CONTROL_ACTUATOR_NAMES: tuple[str, ...] = tuple(
+  f"{side}_{joint}_joint"
+  for side in ("left", "right")
+  for joint in (
+    "hip_yaw",
+    "hip_roll",
+    "hip_pitch",
+    "knee",
+    "ankle_pitch",
+    "ankle_roll",
+  )
+)
+
+CUSTOM_ROBOT_EFFORT_LIMITS: tuple[float, ...] = tuple(
+  _actuator_effort_limit(actuator)
+  for _side in ("left", "right")
+  for actuator in _LEG_ACTUATORS
 )
 
 

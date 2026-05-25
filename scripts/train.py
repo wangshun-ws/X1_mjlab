@@ -8,6 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(REPO_ROOT))
+
 import tyro
 
 import mjlab
@@ -20,7 +24,7 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from src.tasks.velocity.rl import FrameMajorHistoryRslRlVecEnvWrapper
 
-PROJECT_TASK_PREFIXES = ("CustomRobot-",)
+PUBLIC_TASK_IDS = ("X1_flat",)
 
 
 @dataclass(frozen=True)
@@ -181,9 +185,8 @@ def main():
   # Import tasks to populate the registry.
   import src.tasks
 
-  all_tasks = [
-    task_id for task_id in list_tasks() if task_id.startswith(PROJECT_TASK_PREFIXES)
-  ]
+  registered_tasks = set(list_tasks())
+  all_tasks = [task_id for task_id in PUBLIC_TASK_IDS if task_id in registered_tasks]
   chosen_task, remaining_args = tyro.cli(
     tyro.extras.literal_type_from_choices(all_tasks),
     add_help=False,

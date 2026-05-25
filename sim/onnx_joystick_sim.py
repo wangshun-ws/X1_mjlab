@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Standalone MuJoCo ONNX joystick simulation.
 
-This script runs the flat-terrain policy observation used by CustomRobot-Flat:
-  ang_vel, projected_gravity, command, phase, joint_pos, joint_vel, last_action.
+This script runs the flat-terrain policy observation used by X1_flat:
+  ang_vel, projected_gravity, command, phase, joint_pos, joint_vel, actions.
 It does not depend on mjlab or ROS2.
 """
 
@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import csv
 import errno
-import math
 import os
 import struct
 import time
@@ -48,26 +47,27 @@ JOINT_NAMES = [
 NUM_ACTIONS = len(JOINT_NAMES)
 NUM_SINGLE_OBS = 3 + 3 + 3 + 2 + NUM_ACTIONS * 3
 
-DEFAULT_Q = np.array([0.0, 0.0, 0.2, -0.4, 0.2, 0.0, 0.0, 0.0, 0.2, -0.4, 0.2, 0.0], dtype=np.float32)
+DEFAULT_Q = np.array([0.0, 0.0, 0.3, -0.6, 0.3, 0.0, 0.0, 0.0, 0.3, -0.6, 0.3, 0.0], dtype=np.float32)
 ACTION_SCALE = np.full(NUM_ACTIONS, 0.22, dtype=np.float32)
 
 KPS = np.array([100.0, 150.0, 150.0, 180.0, 75.0, 30.0, 100.0, 150.0, 150.0, 180.0, 75.0, 30.0], dtype=np.float32)
 KDS = np.array([1.0, 4.0, 4.0, 4.0, 2.0, 2.0, 1.0, 4.0, 4.0, 4.0, 2.0, 2.0], dtype=np.float32)
-TAU_LIMIT = np.array([80.0, 120.0, 212.0, 180.0, 80.0, 20.0, 80.0, 120.0, 212.0, 180.0, 80.0, 20.0], dtype=np.float32)
+TAU_LIMIT = np.array([80.0, 120.0, 120.0, 180.0, 80.0, 20.0, 80.0, 120.0, 120.0, 180.0, 80.0, 20.0], dtype=np.float32)
 
-JOINT_POS_LOW = np.array([-0.518, -0.175, -0.524, -1.745, -1.082, -0.664, -0.785, -0.175, -0.524, -1.745, -1.082, -0.664], dtype=np.float32)
-JOINT_POS_HIGH = np.array([0.518, 0.960, 1.047, 0.087, 1.082, 0.664, 0.785, 0.960, 1.047, 0.087, 1.082, 0.664], dtype=np.float32)
+JOINT_POS_LOW = np.array([-0.518, -0.175, -0.524, -1.745, -1.082, -0.664, -0.518, -0.175, -0.524, -1.745, -1.082, -0.664], dtype=np.float32)
+JOINT_POS_HIGH = np.array([0.518, 0.960, 1.047, 0.087, 1.082, 0.664, 0.518, 0.960, 1.047, 0.087, 1.082, 0.664], dtype=np.float32)
 
 CMD_LIMIT = np.array([1.0, 0.5, 0.5], dtype=np.float32)
 
-FRAME_STACK = 10
+FRAME_STACK = 6
 CLIP_OBSERVATIONS = 100.0
 CLIP_ACTIONS = 100.0
-PHASE_PERIOD = 0.8
-COMMAND_STAND_THRESHOLD = 0.1
 SIM_DT = 0.001
 DECIMATION = 10
-TARGET_Q_ALPHA = 0.2
+TARGET_LPF_WC = 100.0
+TARGET_LPF_TS = 0.001
+GAIT_PHASE_PERIOD = 0.8
+GAIT_COMMAND_THRESHOLD = 0.1
 DEFAULT_RENDER_DECIMATION = 20
 
 
@@ -78,61 +78,10 @@ def _metadata_list(value: str | None) -> list[str]:
 
 
 def _latest_policy() -> Path | None:
-  root = ROOT / "logs" / "rsl_rl" / "custom_robot_velocity"
+  root = ROOT / "logs" / "rsl_rl" / "x1_flat_velocity"
   candidates = sorted(root.glob("*/policy.onnx"), key=lambda p: p.stat().st_mtime)
   return candidates[-1] if candidates else None
 
-
-class TorqueLogger:
-  def __init__(self, path: Path, joint_names: list[str], log_decimation: int):
-    self.path = path
-    self.joint_names = list(joint_names)
-    self.log_decimation = max(1, log_decimation)
-    self._rows_written = 0
-    self.path.parent.mkdir(parents=True, exist_ok=True)
-    self._file = self.path.open("w", newline="", encoding="utf-8")
-    self._writer = csv.writer(self._file)
-    header = [
-      "sim_time",
-      "sim_step",
-      "policy_step",
-      "cmd_vx",
-      "cmd_vy",
-      "cmd_wz",
-    ]
-    header += [f"tau_cmd_{joint_name}" for joint_name in self.joint_names]
-    header += [f"tau_applied_{joint_name}" for joint_name in self.joint_names]
-    self._writer.writerow(header)
-
-  def maybe_write(
-    self,
-    sim_time: float,
-    sim_step: int,
-    policy_step: int,
-    command: np.ndarray,
-    tau_cmd: np.ndarray,
-    tau_applied: np.ndarray,
-  ) -> None:
-    if sim_step % self.log_decimation != 0:
-      return
-    row = [
-      f"{sim_time:.6f}",
-      sim_step,
-      policy_step,
-      f"{float(command[0]):.6f}",
-      f"{float(command[1]):.6f}",
-      f"{float(command[2]):.6f}",
-    ]
-    row += [f"{float(value):.6f}" for value in tau_cmd]
-    row += [f"{float(value):.6f}" for value in tau_applied]
-    self._writer.writerow(row)
-    self._rows_written += 1
-    if self._rows_written % 200 == 0:
-      self._file.flush()
-
-  def close(self) -> None:
-    self._file.flush()
-    self._file.close()
 
 
 def quat_rotate_inverse(q_wxyz: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -143,6 +92,52 @@ def quat_rotate_inverse(q_wxyz: np.ndarray, v: np.ndarray) -> np.ndarray:
   b = np.cross(q_vec, v) * q_w * 2.0
   c = q_vec * np.dot(q_vec, v) * 2.0
   return a - b + c
+
+
+class DigitalLowPassFilter:
+  def __init__(self, wc: float, ts: float):
+    self.wc = float(wc)
+    self.ts = float(ts)
+    self._input_prev = [0.0, 0.0]
+    self._output_prev = [0.0, 0.0]
+    self._output = 0.0
+    self._update_coefficients()
+
+  def _update_coefficients(self) -> None:
+    den = 2500.0 * self.ts * self.ts * self.wc * self.wc + 7071.0 * self.ts * self.wc + 10000.0
+    self._in1 = 2500.0 * self.ts * self.ts * self.wc * self.wc / den
+    self._in2 = 5000.0 * self.ts * self.ts * self.wc * self.wc / den
+    self._in3 = 2500.0 * self.ts * self.ts * self.wc * self.wc / den
+    self._out1 = -(5000.0 * self.ts * self.ts * self.wc * self.wc - 20000.0) / den
+    self._out2 = -(2500.0 * self.ts * self.ts * self.wc * self.wc - 7071.0 * self.ts * self.wc + 10000.0) / den
+
+  def input(self, value: float) -> None:
+    value = float(value)
+    self._output = (
+      self._in1 * value
+      + self._in2 * self._input_prev[0]
+      + self._in3 * self._input_prev[1]
+      + self._out1 * self._output_prev[0]
+      + self._out2 * self._output_prev[1]
+    )
+    self._input_prev[1] = self._input_prev[0]
+    self._input_prev[0] = value
+    self._output_prev[1] = self._output_prev[0]
+    self._output_prev[0] = self._output
+
+  def output(self) -> float:
+    return self._output
+
+  def init(self, value: float) -> None:
+    value = float(value)
+    self._input_prev[0] = value
+    self._input_prev[1] = value
+    self._output_prev[0] = value
+    self._output_prev[1] = value
+    self._output = value
+
+  def reset(self, value: float) -> None:
+    self.init(value)
 
 
 class JoystickUnavailableError(RuntimeError):
@@ -345,12 +340,11 @@ class OnnxPolicySim:
     self.frame_stack = FRAME_STACK
     self.clip_observations = CLIP_OBSERVATIONS
     self.clip_actions = CLIP_ACTIONS
-    self.phase_period = PHASE_PERIOD
-    self.command_stand_threshold = COMMAND_STAND_THRESHOLD
     self.sim_dt = SIM_DT
     self.decimation = DECIMATION
     self.policy_dt = self.sim_dt * self.decimation
-    self.target_q_alpha = TARGET_Q_ALPHA
+    self.target_lpf_wc = TARGET_LPF_WC
+    self.target_lpf_ts = TARGET_LPF_TS
     self.joint_armature = TRAINING_JOINT_ARMATURE
     self.joint_frictionloss = TRAINING_JOINT_FRICTIONLOSS
 
@@ -363,19 +357,12 @@ class OnnxPolicySim:
     self.joint_pos_low = JOINT_POS_LOW.copy()
     self.joint_pos_high = JOINT_POS_HIGH.copy()
     self.cmd_limit = CMD_LIMIT.copy()
-    self.last_tau_cmd = np.zeros(self.num_actions, dtype=np.float32)
-    self.last_tau_applied = np.zeros(self.num_actions, dtype=np.float32)
-    self.torque_logger: TorqueLogger | None = None
-
+    self.target_q_filters = [
+      DigitalLowPassFilter(self.target_lpf_wc, self.target_lpf_ts)
+      for _ in range(self.num_actions)
+    ]
     self._load_model()
     self._load_policy()
-    if self.args.torque_log is not None:
-      self.torque_logger = TorqueLogger(
-        path=self.args.torque_log,
-        joint_names=self.joint_names,
-        log_decimation=self.args.torque_log_decimation,
-      )
-      print(f"[INFO] torque log: {self.args.torque_log} (every {self.torque_logger.log_decimation} sim steps)")
     self._reset()
     self._initialize_history()
 
@@ -426,7 +413,6 @@ class OnnxPolicySim:
     self.gyro_sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "imu_ang_vel")
     if self.gyro_sid < 0:
       raise ValueError("scene must contain sensor 'imu_ang_vel'")
-
   def _load_policy(self) -> None:
     self.session = ort.InferenceSession(str(self.policy_path), providers=["CPUExecutionProvider"])
     self.input_name = self.session.get_inputs()[0].name
@@ -437,10 +423,11 @@ class OnnxPolicySim:
       if shape[1] % self.frame_stack != 0:
         raise ValueError(f"policy input dim {shape[1]} is not divisible by frame_stack")
       self.policy_single_obs = shape[1] // self.frame_stack
-      if self.policy_single_obs > self.num_single_obs:
+      if self.policy_single_obs != self.num_single_obs:
         raise ValueError(
           f"policy expects {self.policy_single_obs} obs per frame, "
-          f"but simulator builds {self.num_single_obs}"
+          f"but simulator builds {self.num_single_obs}. Re-export a policy "
+          "trained with the phase/actions observation layout."
         )
 
     self.hist_obs: deque[np.ndarray] = deque(maxlen=self.frame_stack)
@@ -449,7 +436,7 @@ class OnnxPolicySim:
 
     self.prev_action = np.zeros(self.num_actions, dtype=np.float32)
     self.current_action = np.zeros(self.num_actions, dtype=np.float32)
-    self.filtered_target_q: np.ndarray | None = None
+    self.current_target_q_raw = self.default_q.copy()
     self.policy_step_count = 0
     self.sim_step_count = 0
 
@@ -523,8 +510,12 @@ class OnnxPolicySim:
     )
     self.data.qpos[self.qpos_adrs] = self.default_q
     self.data.ctrl[:] = 0.0
-    self.last_tau_cmd[:] = 0.0
-    self.last_tau_applied[:] = 0.0
+    self.prev_action[:] = 0.0
+    self.current_action[:] = 0.0
+    self.policy_step_count = 0
+    self.sim_step_count = 0
+    self.current_target_q_raw = self.default_q.copy()
+    self._reset_target_q_filters(self.current_target_q_raw)
     mujoco.mj_forward(self.model, self.data)
 
   def _initialize_history(self) -> None:
@@ -533,32 +524,38 @@ class OnnxPolicySim:
     for _ in range(self.frame_stack):
       self.hist_obs.append(obs.copy())
 
+
+
+
   def _sensor(self, sid: int) -> np.ndarray:
     adr = int(self.model.sensor_adr[sid])
     dim = int(self.model.sensor_dim[sid])
     return self.data.sensordata[adr : adr + dim].copy()
 
   def _phase_obs(self, command: np.ndarray) -> np.ndarray:
-    phase = (self.policy_step_count * self.policy_dt) % self.phase_period
-    phase = phase / self.phase_period
-    obs = np.array(
-      [math.sin(2.0 * math.pi * phase), math.cos(2.0 * math.pi * phase)],
-      dtype=np.float32,
-    )
-    if np.linalg.norm(command) < self.command_stand_threshold:
-      obs[:] = 0.0
-    return obs
+    command = np.asarray(command, dtype=np.float32)
+    phase = np.zeros(2, dtype=np.float32)
+    if np.linalg.norm(command) < GAIT_COMMAND_THRESHOLD:
+      return phase
+    global_phase = (
+      (self.policy_step_count * self.policy_dt) % GAIT_PHASE_PERIOD
+    ) / GAIT_PHASE_PERIOD
+    phase_angle = global_phase * np.pi * 2.0
+    phase[0] = np.sin(phase_angle)
+    phase[1] = np.cos(phase_angle)
+    return phase
 
   def _single_obs(self, command: np.ndarray) -> np.ndarray:
     root_quat = self.data.qpos[self.free_qpos_adr + 3 : self.free_qpos_adr + 7].copy()
     projected_gravity = quat_rotate_inverse(root_quat, np.array([0.0, 0.0, -1.0], dtype=np.float32))
     joint_pos = self.data.qpos[self.qpos_adrs].astype(np.float32)
     joint_vel = self.data.qvel[self.qvel_adrs].astype(np.float32)
+    phase = self._phase_obs(command)
     parts = [
       self._sensor(self.gyro_sid).astype(np.float32),
       projected_gravity.astype(np.float32),
       command.astype(np.float32),
-      self._phase_obs(command),
+      phase,
       (joint_pos - self.default_q).astype(np.float32),
       joint_vel,
       self.prev_action.astype(np.float32),
@@ -582,17 +579,34 @@ class OnnxPolicySim:
     if action.shape != (self.num_actions,):
       raise RuntimeError(f"policy action shape must be ({self.num_actions},), got {action.shape}")
     self.current_action = action
+    self.current_target_q_raw = self._raw_target_q(action)
     self.policy_step_count += 1
 
+  def _raw_target_q(self, action: np.ndarray) -> np.ndarray:
+    raw = action * self.action_scale + self.default_q
+    return raw.astype(np.float32)
+
+  def _reset_target_q_filters(self, target_q: np.ndarray) -> None:
+    target_q = np.asarray(target_q, dtype=np.float32)
+    if target_q.shape != (self.num_actions,):
+      raise ValueError(f"target_q shape must be ({self.num_actions},), got {target_q.shape}")
+    for lpf, value in zip(self.target_q_filters, target_q, strict=False):
+      lpf.reset(float(value))
+    return
+
+  def _filter_target_q(self, target_q: np.ndarray) -> np.ndarray:
+    target_q = np.asarray(target_q, dtype=np.float32)
+    if target_q.shape != (self.num_actions,):
+      raise ValueError(f"target_q shape must be ({self.num_actions},), got {target_q.shape}")
+    filtered = np.empty(self.num_actions, dtype=np.float32)
+    for idx, (lpf, value) in enumerate(zip(self.target_q_filters, target_q, strict=False)):
+      lpf.input(float(value))
+      filtered[idx] = lpf.output()
+    return filtered
+
   def _target_q(self) -> np.ndarray:
-    raw = self.current_action * self.action_scale + self.default_q
-    raw = np.clip(raw, self.joint_pos_low, self.joint_pos_high)
-    if self.filtered_target_q is None or self.target_q_alpha >= 1.0:
-      self.filtered_target_q = raw.copy()
-    else:
-      a = self.target_q_alpha
-      self.filtered_target_q = a * raw + (1.0 - a) * self.filtered_target_q
-    return self.filtered_target_q.astype(np.float32)
+    filtered = self._filter_target_q(self.current_target_q_raw)
+    return np.clip(filtered, self.joint_pos_low, self.joint_pos_high)
 
   def step(self, command: np.ndarray) -> np.ndarray:
     command = np.clip(command, -self.cmd_limit, self.cmd_limit)
@@ -605,25 +619,12 @@ class OnnxPolicySim:
     tau = np.clip(tau, -self.tau_limit, self.tau_limit)
     self.data.ctrl[self.actuator_ids] = tau
     mujoco.mj_step(self.model, self.data)
-    self.last_tau_cmd = tau.astype(np.float32, copy=True)
-    self.last_tau_applied = self.data.actuator_force[self.actuator_ids].astype(np.float32, copy=True)
-    if self.torque_logger is not None:
-      self.torque_logger.maybe_write(
-        sim_time=float(self.data.time),
-        sim_step=self.sim_step_count,
-        policy_step=self.policy_step_count,
-        command=command,
-        tau_cmd=self.last_tau_cmd,
-        tau_applied=self.last_tau_applied,
-      )
     self.prev_action = self.current_action.copy()
     self.sim_step_count += 1
     return command
 
   def close(self) -> None:
-    if self.torque_logger is not None:
-      self.torque_logger.close()
-      self.torque_logger = None
+    pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -633,7 +634,7 @@ def parse_args() -> argparse.Namespace:
     "--policy",
     type=Path,
     default=latest,
-    help="ONNX policy path. Defaults to latest logs/rsl_rl/custom_robot_velocity/*/policy.onnx.",
+    help="ONNX policy path. Defaults to latest logs/rsl_rl/x1_flat_velocity/*/policy.onnx.",
   )
   parser.add_argument("--base-height", type=float, default=1.03)
   parser.add_argument("--duration", type=float, default=0.0, help="Seconds to run; 0 means until viewer closes.")
@@ -665,18 +666,6 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--joy-mode-button", type=int, default=7)
   parser.add_argument("--enabled", action=argparse.BooleanOptionalAction, default=True)
   parser.add_argument("--walking", action=argparse.BooleanOptionalAction, default=True)
-  parser.add_argument(
-    "--torque-log",
-    type=Path,
-    default=None,
-    help="Optional CSV path for joint torque logs.",
-  )
-  parser.add_argument(
-    "--torque-log-decimation",
-    type=int,
-    default=1,
-    help="Write one torque log row every N sim steps.",
-  )
   return parser.parse_args()
 
 

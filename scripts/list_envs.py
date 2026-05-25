@@ -1,5 +1,12 @@
 """Script to list mjlab environments."""
 
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(REPO_ROOT))
+
 import tyro
 from prettytable import PrettyTable
 
@@ -7,7 +14,7 @@ import mjlab
 import src.tasks
 from mjlab.tasks.registry import list_tasks
 
-PROJECT_TASK_PREFIXES = ("CustomRobot-",)
+PUBLIC_TASK_IDS = ("X1_flat",)
 
 
 def list_environments(keyword: str | None = None):
@@ -20,9 +27,8 @@ def list_environments(keyword: str | None = None):
   table.title = "Available Environments in mjlab"
   table.align["Task ID"] = "l"
 
-  all_tasks = [
-    task_id for task_id in list_tasks() if task_id.startswith(PROJECT_TASK_PREFIXES)
-  ]
+  registered_tasks = set(list_tasks())
+  all_tasks = [task_id for task_id in PUBLIC_TASK_IDS if task_id in registered_tasks]
   idx = 0
   for task_id in all_tasks:
     try:

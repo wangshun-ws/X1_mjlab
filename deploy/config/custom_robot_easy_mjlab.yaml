@@ -3,28 +3,28 @@
 # Flat YAML format (matches deploy_easy_amp.py reference style),
 # preserving the training parameters of the CustomRobot velocity policy.
 #
-# Observation layout (simple phase, 47D per frame):
-#   ang_vel(3) + projected_gravity(3) + command(3) + phase(2) +
-#   joint_pos(12) + joint_vel(12) + last_action(12) = 47
-# frame_stack=10 → policy input = 470D.
+# Observation layout (47D per frame):
+#   ang_vel(3) + projected_gravity(3) + command(3) +
+#   phase(2) + joint_pos(12) + joint_vel(12) + actions(12) = 47
+# frame_stack=6 -> policy input = 282D.
 
-policy_path: "/home/wangshun/X_2/rl_locomotion/humanoid_deploy/policies/walk/policy5_18.onnx"
-standup_policy_path: "/home/wangshun/X_2/rl_locomotion/humanoid_deploy/policies/walk/policy5_18.onnx"
+policy_path: "/home/wangshun/X1_mjlab/logs/rsl_rl/x1_flat_velocity/2026-05-25_17-30-44/policy.onnx"
 
 simulation_dt: 0.001
 decimation: 10
-target_filter_alpha: 0.2
-frame_stack: 10
+# Second-order digital low-pass filter for target joint positions only.
+# Keep ts aligned with the control loop period. It is intentionally explicit.
+target_lpf:
+  wc: 100.0
+  ts: 0.001
+frame_stack: 6
 num_single_obs: 47
-
-phase:
-  type: "simple"
-  period: 0.8
-  stand_threshold: 0.1
 
 clip_observations: 100.0
 clip_actions: 100.0
 
+# Conservative deploy-time action scale.
+# Training uses 0.25; deployment keeps 0.22 on purpose.
 action_scale: 0.22
 num_actions: 12
 
@@ -62,17 +62,44 @@ controller_joint_names:
   ]
 
 default_angles:
-  [0.0, 0.0, 0.2, -0.4, 0.2, 0.0, 0.0, 0.0, 0.2, -0.4, 0.2, 0.0]
-default_angles_standup:
-  [0.0, 0.0, 0.2, -0.4, 0.2, 0.0, 0.0, 0.0, 0.2, -0.4, 0.2, 0.0]
+  [0.0, 0.0, 0.3, -0.6, 0.3, 0.0, 0.0, 0.0, 0.3, -0.6, 0.3, 0.0]
 
 robot_config:
   kps:
-    [100.0, 150.0, 150.0, 180.0, 60.0, 20.0, 100.0, 150.0, 150.0, 180.0, 60.0, 20.0]
+    [100.0, 150.0, 150.0, 180.0, 75.0, 30.0, 100.0, 150.0, 150.0, 180.0, 75.0, 30.0]
   kds:
     [1.0, 4.0, 4.0, 4.0, 2.0, 2.0, 1.0, 4.0, 4.0, 4.0, 2.0, 2.0]
-  tau_limit:
-    [50.0, 100.0, 212.0, 93.0, 64.8, 20.0, 50.0, 100.0, 212.0, 93.0, 64.8, 20.0]
+  # joint_pos_limits:
+  #   low:
+  #     [
+  #       -0.518,
+  #       -0.175,
+  #       -0.524,
+  #       -1.745,
+  #       -1.082,
+  #       -0.664,
+  #       -0.785,
+  #       -0.175,
+  #       -0.524,
+  #       -1.745,
+  #       -1.082,
+  #       -0.664,
+  #     ]
+  #   high:
+  #     [
+  #       0.518,
+  #       0.960,
+  #       1.047,
+  #       0.087,
+  #       1.082,
+  #       0.664,
+  #       0.785,
+  #       0.960,
+  #       1.047,
+  #       0.087,
+  #       1.082,
+  #       0.664,
+  #     ]
   joint_pos_limits:
     low:
       [
@@ -82,7 +109,7 @@ robot_config:
         -1.745,
         -1.082,
         -0.664,
-        -0.785,
+        -0.518,
         -0.175,
         -0.524,
         -1.745,
@@ -97,7 +124,7 @@ robot_config:
         0.087,
         1.082,
         0.664,
-        0.785,
+        0.518,
         0.960,
         1.047,
         0.087,
@@ -107,5 +134,5 @@ robot_config:
 
 command_limits:
   lin_vel_x: 0.6
-  lin_vel_y: 0.5
-  ang_vel_z: 0.5
+  lin_vel_y: 0.6
+  ang_vel_z: 0.6

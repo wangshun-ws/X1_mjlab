@@ -1,15 +1,23 @@
 """Custom robot velocity environment configurations."""
 
+import math
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
-from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, RayCastSensorCfg
-from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
-from src.assets.robots import CUSTOM_ROBOT_ACTION_SCALE, get_custom_robot_cfg
+from src.assets.robots import (
+  CUSTOM_ROBOT_ACTION_SCALE,
+  CUSTOM_ROBOT_CONTROL_ACTUATOR_NAMES,
+  CUSTOM_ROBOT_EFFORT_LIMITS,
+  get_custom_robot_cfg,
+)
+from src.tasks.velocity.delayed_actions import DelayedJointPositionActionCfg
+import src.tasks.velocity.mdp as project_mdp
 from src.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 BASE_BODY_NAME = "pelvis_link"
@@ -65,8 +73,16 @@ def custom_robot_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.terrain.terrain_generator.curriculum = True
 
   joint_pos_action = cfg.actions["joint_pos"]
-  assert isinstance(joint_pos_action, JointPositionActionCfg)
+  assert isinstance(joint_pos_action, DelayedJointPositionActionCfg)
   joint_pos_action.scale = CUSTOM_ROBOT_ACTION_SCALE
+  joint_pos_action.delay_min_lag = 0
+  joint_pos_action.delay_max_lag = 0
+  joint_pos_action.delay_per_env = True
+  joint_pos_action.delay_hold_prob = 0.0
+  joint_pos_action.delay_update_period = (
+    math.ceil(cfg.episode_length_s / cfg.sim.mujoco.timestep) + 1
+  )
+  joint_pos_action.delay_per_env_phase = False
 
   cfg.viewer.body_name = BASE_BODY_NAME
   cfg.viewer.distance = 3.0
@@ -79,6 +95,17 @@ def custom_robot_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.observations["critic"].terms["foot_height"].params[
     "asset_cfg"
   ].site_names = FOOT_SITE_NAMES
+  cfg.observations["critic"].terms["actuator_torque"] = ObservationTermCfg(
+    func=project_mdp.normalized_actuator_torque,
+    params={
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        actuator_names=list(CUSTOM_ROBOT_CONTROL_ACTUATOR_NAMES),
+        preserve_order=True,
+      ),
+      "effort_limits": CUSTOM_ROBOT_EFFORT_LIMITS,
+    },
+  )
 
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = FOOT_GEOM_NAMES
   cfg.events["base_com"].params["asset_cfg"].body_names = ("waist_yaw_link",)
@@ -102,7 +129,6 @@ def custom_robot_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     r".*ankle_roll.*": 0.1,
   }
 
-  cfg.rewards["foot_gait"].params["offset"] = [0.0, 0.5]
   cfg.rewards["body_orientation_l2"].params["asset_cfg"].body_names = (
     BASE_BODY_NAME,
   )
@@ -111,8 +137,25 @@ def custom_robot_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "asset_cfg"
   ].site_names = FOOT_SITE_NAMES
   cfg.rewards["foot_slip"].params["asset_cfg"].site_names = FOOT_SITE_NAMES
+  cfg.rewards["foot_touchdown_velocity"].params[
+    "asset_cfg"
+  ].site_names = FOOT_SITE_NAMES
+  cfg.rewards["actuator_torque_l2"] = RewardTermCfg(
+    func=project_mdp.normalized_torque_l2,
+    weight=-0.1,
+    params={
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        actuator_names=list(CUSTOM_ROBOT_CONTROL_ACTUATOR_NAMES),
+        preserve_order=True,
+      ),
+      "effort_limits": CUSTOM_ROBOT_EFFORT_LIMITS,
+      "command_name": "twist",
+      "command_threshold": 0.1,
+    },
+  )
   cfg.rewards["self_collisions"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
+    func=project_mdp.self_collision_cost,
     weight=-5.0,
     params={"sensor_name": self_collision_cfg.name, "force_threshold": 10.0},
   )
@@ -123,8 +166,9 @@ def custom_robot_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.episode_length_s = int(1e9)
 
     cfg.observations["actor"].enable_corruption = False
+    joint_pos_action.delay_min_lag = 0
+    joint_pos_action.delay_max_lag = 0
     cfg.events.pop("push_robot", None)
-    cfg.events.pop("action_delay", None)
     cfg.events["randomize_terrain"] = EventTermCfg(
       func=envs_mdp.randomize_terrain,
       mode="reset",

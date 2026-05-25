@@ -10,7 +10,6 @@ from dataclasses import replace
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp import dr
-from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.command_manager import CommandTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
@@ -23,13 +22,13 @@ from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sensor import GridPatternCfg, ObjRef, RayCastSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
-from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
+from src.tasks.velocity.delayed_actions import DelayedJointPositionActionCfg
 import src.tasks.velocity.mdp as mdp
 
 
@@ -124,7 +123,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       terms=actor_terms,
       concatenate_terms=True,
       enable_corruption=True,
-      history_length=10,
+      history_length=6,
       # Keep `(B, H, D)` here; the project RSL wrapper flattens complete frames.
       flatten_history_dim=False,
     ),
@@ -132,7 +131,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       terms=critic_terms,
       concatenate_terms=True,
       enable_corruption=False,
-      history_length=10,
+      history_length=6,
       flatten_history_dim=False,
     ),
   }
@@ -152,11 +151,13 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   actions: dict[str, ActionTermCfg] = {
-    "joint_pos": JointPositionActionCfg(
+    "joint_pos": DelayedJointPositionActionCfg(
       entity_name="robot",
       actuator_names=(".*",),
       scale=0.25,  # Override per-robot.
       use_default_offset=True,
+      delay_min_lag=0,
+      delay_max_lag=0,
     )
   }
 
@@ -274,7 +275,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
   rewards = {
     "track_linear_velocity": RewardTermCfg(
       func=mdp.track_linear_velocity,
-      weight=1.0,
+      weight=1.25,
       params={"command_name": "twist", "std": math.sqrt(0.25)},
     ),
     "track_angular_velocity": RewardTermCfg(
@@ -284,7 +285,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "body_orientation_l2": RewardTermCfg(
       func=mdp.body_orientation_l2,
-      weight=-1.0,
+      weight=-10.0,
       params={"asset_cfg": SceneEntityCfg("robot", body_names=())},  # Set per-robot.
     ),
     "pose": RewardTermCfg(
@@ -302,21 +303,22 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "body_ang_vel": RewardTermCfg(
       func=mdp.body_angular_velocity_penalty,
-      weight=-0.2,  # Override per-robot
+      weight=-0.5,  # Override per-robot
       params={"asset_cfg": SceneEntityCfg("robot", body_names=())},  # Set per-robot.
     ),
     "angular_momentum": RewardTermCfg(
       func=mdp.angular_momentum_penalty,
-      weight=-0.08,  # Override per-robot
+      weight=-0.03,  # Override per-robot
       params={"sensor_name": "robot/root_angmom"},
     ),
     "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-200.0),
     "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-5e-7),
-    "joint_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-10.0),
-    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+    "joint_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-5.0),
+    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.05),
+    "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.01),
     "ankle_action_rate_l2": RewardTermCfg(
       func=mdp.subset_action_rate_l2,
-      weight=-0.05,
+      weight=-0.1,
       params={
         "action_term_name": "joint_pos",
         "joint_names": [
@@ -333,12 +335,23 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       params={
         "period": 0.8,
         "offset": [0.0, 0.5],
-        "threshold": 0.62,
-        "command_threshold": 0.1,
+        "threshold": 0.6,
         "command_name": "twist",
+        "command_threshold": 0.1,
         "sensor_name": "feet_ground_contact",
-      }
+      },
     ),
+    # "feet_double_support": RewardTermCfg(
+    #   func=mdp.feet_double_support,
+    #   weight=-3.0,
+    #   params={
+    #     "sensor_name": "feet_ground_contact",
+    #     "command_name": "twist",
+    #     "command_threshold": 0.1,
+    #     "window_s": 0.8,
+    #     "allowed_double_support": 0.45,
+    #   },
+    # ),
     "foot_clearance": RewardTermCfg(
       func=mdp.feet_clearance,
       weight=-1.0,
@@ -361,11 +374,24 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "soft_landing": RewardTermCfg(
       func=mdp.soft_landing,
-      weight=-5e-3,
+      weight=-0.002,
       params={
         "sensor_name": "feet_ground_contact",
         "command_name": "twist",
         "command_threshold": 0.1,
+      },
+    ),
+    "foot_touchdown_velocity": RewardTermCfg(
+      func=mdp.feet_touchdown_velocity,
+      weight=-20.0,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "command_name": "twist",
+        "command_threshold": 0.1,
+        "base_threshold": 0.13,
+        "threshold_gain": 0.2,
+        "max_threshold": 0.45,
+        "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
       },
     ),
     "stand_still": RewardTermCfg(
